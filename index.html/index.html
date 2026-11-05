@@ -7,11 +7,11 @@
 <meta name="mobile-web-app-capable" content="yes">
 <title>카메라 번역 (→ 일본어)</title>
 <style>
-  :root { --bg:#111; --card:#1e1e22; --fg:#f2f2f2; --sub:#9a9aa3; --accent:#4f8cff; }
+  :root { --bg:#111; --card:#1e1e22; --fg:#f2f2f2; --sub:#9a9aa3; --accent:#4f8cff; --line:#2c2c32; }
   * { box-sizing: border-box; }
   html, body { margin:0; background:var(--bg); color:var(--fg);
-    font-family: -apple-system, "Apple SD Gothic Neo", "Noto Sans KR", "Noto Sans JP", sans-serif; }
-  .wrap { max-width: 640px; margin: 0 auto; padding: 12px 12px calc(24px + env(safe-area-inset-bottom)); }
+    font-family: -apple-system, "Apple SD Gothic Neo", "Noto Sans KR", "Hiragino Sans", "Noto Sans JP", sans-serif; }
+  .wrap { max-width: 640px; margin: 0 auto; padding: 12px 12px calc(32px + env(safe-area-inset-bottom)); }
   h1 { font-size: 18px; margin: 8px 0 12px; }
   .view { position: relative; background:#000; border-radius: 14px; overflow: hidden; aspect-ratio: 3/4; }
   video, canvas#shot { width:100%; height:100%; object-fit: cover; display:block; }
@@ -21,17 +21,30 @@
     background: var(--accent); color:#fff; text-align:center; cursor:pointer; }
   button.sec, label.btn.sec { background: var(--card); color: var(--fg); }
   button:disabled { opacity:.5; }
-  .card { background: var(--card); border-radius: 14px; padding: 14px; margin-top: 10px; }
-  .card h2 { font-size: 13px; color: var(--sub); margin: 0 0 6px; font-weight: 600; }
-  .card p { margin: 0; white-space: pre-wrap; line-height: 1.6; word-break: break-word; }
-  #jp { font-size: 20px; }
   #status { color: var(--sub); font-size: 14px; min-height: 20px; margin-top: 6px; }
+  #status.err { color: #ff7b7b; }
+  .card { background: var(--card); border-radius: 14px; padding: 6px 14px; margin-top: 10px; }
+  .card h2 { font-size: 13px; color: var(--sub); margin: 8px 0 4px; font-weight: 600; }
+  .row { display:flex; justify-content:space-between; gap:12px; padding: 10px 0; border-bottom: 1px solid var(--line); line-height: 1.5; }
+  .row:last-child { border-bottom: 0; }
+  .row .o { color: var(--sub); flex: 1; word-break: break-word; }
+  .row .j { font-size: 18px; flex: 1; text-align: right; word-break: break-word; }
+  .pw { display:flex; gap:8px; margin: 0 0 10px; }
+  .pw input { flex:1; padding: 12px; border-radius: 10px; border: 1px solid var(--line); background: var(--card); color: var(--fg); font-size: 16px; }
+  .pw button { flex: 0 0 auto; padding: 12px 16px; }
   input[type=file] { display:none; }
+  .hidden { display:none !important; }
 </style>
 </head>
 <body>
 <div class="wrap">
   <h1>📷 카메라 번역 · 한국어/영어 → 日本語</h1>
+
+  <!-- 비밀번호 -->
+  <div id="pwBox" class="pw hidden">
+    <input id="pw" type="password" placeholder="비밀번호" autocomplete="current-password">
+    <button id="pwSave">확인</button>
+  </div>
 
   <div class="view">
     <video id="video" autoplay playsinline muted></video>
@@ -40,7 +53,7 @@
 
   <div class="btns">
     <button id="snap">촬영 & 번역</button>
-    <button id="retake" class="sec" style="display:none">다시 찍기</button>
+    <button id="retake" class="sec hidden">다시 찍기</button>
   </div>
   <div class="btns">
     <button id="flip" class="sec">전/후면 전환</button>
@@ -49,15 +62,39 @@
   </div>
   <div id="status"></div>
 
-  <div class="card"><h2>인식된 글자</h2><p id="orig">-</p></div>
-  <div class="card"><h2>일본어 번역</h2><p id="jp">-</p></div>
+  <div class="card" id="result" style="display:none">
+    <h2>번역 결과</h2>
+    <div id="list"></div>
+  </div>
+  <div class="btns" id="copyRow" style="display:none">
+    <button id="copy" class="sec">일본어만 복사</button>
+  </div>
 </div>
 
-<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
 <script>
+// ★ Cloudflare Worker 배포 후 나오는 주소로 바꿔주세요 (끝에 / 없이)
+const WORKER_URL = "https://여기에-워커-주소.workers.dev";
+
 const $ = id => document.getElementById(id);
 const video = $('video'), shot = $('shot'), statusEl = $('status');
-let stream = null, facing = 'environment', worker = null;
+let stream = null, facing = 'environment', busy = false, lastItems = [];
+
+function setStatus(msg, isErr) {
+  statusEl.textContent = msg || '';
+  statusEl.className = isErr ? 'err' : '';
+}
+function getPw() { try { return localStorage.getItem('tr_pw') || ''; } catch (e) { return ''; } }
+function savePw(v) { try { localStorage.setItem('tr_pw', v); } catch (e) {} }
+function clearPw() { try { localStorage.removeItem('tr_pw'); } catch (e) {} }
+
+function showPwBox(show) { $('pwBox').classList.toggle('hidden', !show); }
+if (!getPw()) showPwBox(true);
+
+$('pwSave').onclick = () => {
+  const v = $('pw').value.trim();
+  if (!v) return;
+  savePw(v); showPwBox(false); setStatus('저장했어요. 이제 촬영해 보세요.');
+};
 
 async function startCamera() {
   stopCamera();
@@ -68,71 +105,67 @@ async function startCamera() {
     });
     video.srcObject = stream;
     video.style.display = 'block'; shot.style.display = 'none';
-    $('snap').style.display = ''; $('retake').style.display = 'none';
-    statusEl.textContent = '';
+    $('snap').classList.remove('hidden'); $('retake').classList.add('hidden');
+    setStatus('');
   } catch (e) {
-    statusEl.textContent = '카메라를 열 수 없어요. 권한을 허용하거나 "사진 선택"을 써보세요.';
+    setStatus('카메라를 열 수 없어요. 권한을 허용하거나 "사진 선택"을 써보세요.', true);
   }
 }
 function stopCamera() {
   if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; }
 }
-
-async function getWorker() {
-  if (worker) return worker;
-  statusEl.textContent = '글자 인식 엔진 불러오는 중… (처음 한 번만, 조금 걸려요)';
-  worker = await Tesseract.createWorker('eng+kor');
-  return worker;
-}
-
 function showFrozen() {
   video.style.display = 'none'; shot.style.display = 'block';
-  $('snap').style.display = 'none'; $('retake').style.display = '';
+  $('snap').classList.add('hidden'); $('retake').classList.remove('hidden');
 }
 
-async function processCanvas() {
-  $('orig').textContent = '-'; $('jp').textContent = '-';
+// 캔버스 → 줄여서 JPEG base64
+function canvasToBase64() {
+  const max = 1600;
+  const s = Math.min(1, max / Math.max(shot.width, shot.height));
+  const c = document.createElement('canvas');
+  c.width = Math.round(shot.width * s); c.height = Math.round(shot.height * s);
+  c.getContext('2d').drawImage(shot, 0, 0, c.width, c.height);
+  return c.toDataURL('image/jpeg', 0.85).split(',')[1];
+}
+
+function render(items) {
+  const list = $('list'); list.innerHTML = '';
+  lastItems = items;
+  for (const it of items) {
+    const row = document.createElement('div'); row.className = 'row';
+    const o = document.createElement('div'); o.className = 'o'; o.textContent = it.original;
+    const j = document.createElement('div'); j.className = 'j'; j.textContent = it.japanese;
+    row.append(o, j); list.append(row);
+  }
+  $('result').style.display = items.length ? 'block' : 'none';
+  $('copyRow').style.display = items.length ? 'flex' : 'none';
+}
+
+async function translateShot() {
+  if (busy) return;
+  const pw = getPw();
+  if (!pw) { showPwBox(true); setStatus('먼저 비밀번호를 입력해 주세요.', true); return; }
+  busy = true; render([]);
+  setStatus('읽고 번역하는 중… (몇 초 걸려요)');
   try {
-    const w = await getWorker();
-    statusEl.textContent = '글자 인식 중…';
-    const { data } = await w.recognize(shot);
-    const text = cleanText(data.text);
-    if (!text) { statusEl.textContent = '글자를 찾지 못했어요. 더 가깝고 밝게 찍어보세요.'; return; }
-    $('orig').textContent = text;
-    statusEl.textContent = '일본어로 번역 중…';
-    const lang = /[\uAC00-\uD7A3]/.test(text) ? 'ko' : 'en';
-    const jp = await translate(text, lang);
-    $('jp').textContent = jp;
-    statusEl.textContent = '완료 (' + (lang === 'ko' ? '한국어' : '영어') + ' → 일본어)';
+    const res = await fetch(WORKER_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password: pw, image: canvasToBase64(), mime: 'image/jpeg' })
+    });
+    const data = await res.json().catch(() => ({}));
+    if (res.status === 401) { clearPw(); showPwBox(true); setStatus('비밀번호가 틀렸어요. 다시 입력해 주세요.', true); return; }
+    if (!res.ok) { setStatus(data.error || ('오류가 났어요 (' + res.status + ')'), true); return; }
+    const items = Array.isArray(data.items) ? data.items : [];
+    if (!items.length) { setStatus('글자를 찾지 못했어요. 더 가깝고 밝게 찍어보세요.', true); return; }
+    render(items);
+    setStatus('완료 · ' + items.length + '개');
   } catch (e) {
-    console.error(e);
-    statusEl.textContent = '오류: ' + (e.message || e);
+    setStatus('서버에 연결하지 못했어요. 인터넷이나 WORKER_URL을 확인해 주세요.', true);
+  } finally {
+    busy = false;
   }
-}
-
-function cleanText(t) {
-  return (t || '').replace(/[ \t]+/g, ' ').replace(/\n{3,}/g, '\n\n').trim();
-}
-
-// MyMemory 무료 API (요청당 약 500자 제한) → 줄 단위로 묶어서 요청
-async function translate(text, from) {
-  const lines = text.split('\n').filter(l => l.trim());
-  const chunks = []; let cur = '';
-  for (const l of lines) {
-    if ((cur + '\n' + l).length > 450) { if (cur) chunks.push(cur); cur = l.slice(0, 450); }
-    else cur = cur ? cur + '\n' + l : l;
-  }
-  if (cur) chunks.push(cur);
-
-  const out = [];
-  for (const c of chunks) {
-    const url = 'https://api.mymemory.translated.net/get?q=' + encodeURIComponent(c) + '&langpair=' + from + '|ja';
-    const r = await fetch(url);
-    const j = await r.json();
-    if (j.responseStatus && Number(j.responseStatus) !== 200) throw new Error(j.responseDetails || '번역 실패');
-    out.push(j.responseData.translatedText);
-  }
-  return out.join('\n');
 }
 
 $('snap').onclick = async () => {
@@ -140,24 +173,30 @@ $('snap').onclick = async () => {
   shot.width = video.videoWidth; shot.height = video.videoHeight;
   shot.getContext('2d').drawImage(video, 0, 0);
   showFrozen(); stopCamera();
-  await processCanvas();
+  await translateShot();
 };
-$('retake').onclick = startCamera;
+$('retake').onclick = () => { render([]); startCamera(); };
 $('flip').onclick = () => { facing = facing === 'environment' ? 'user' : 'environment'; startCamera(); };
 
-$('file').onchange = async e => {
+$('file').onchange = e => {
   const f = e.target.files[0]; if (!f) return;
   const img = new Image();
   img.onload = async () => {
     const max = 2000, s = Math.min(1, max / Math.max(img.width, img.height));
-    shot.width = img.width * s; shot.height = img.height * s;
+    shot.width = Math.round(img.width * s); shot.height = Math.round(img.height * s);
     shot.getContext('2d').drawImage(img, 0, 0, shot.width, shot.height);
     URL.revokeObjectURL(img.src);
     showFrozen(); stopCamera();
-    await processCanvas();
+    await translateShot();
   };
   img.src = URL.createObjectURL(f);
   e.target.value = '';
+};
+
+$('copy').onclick = async () => {
+  const txt = lastItems.map(i => i.japanese).join('\n');
+  try { await navigator.clipboard.writeText(txt); setStatus('복사했어요.'); }
+  catch (e) { setStatus('복사에 실패했어요.', true); }
 };
 
 startCamera();
